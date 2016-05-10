@@ -15,7 +15,9 @@ public class RPCCaller implements Runnable {
 
   private ExecutorService threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
-  private Map<Integer, BlockingQueue<RPCResponseEvent>> responseMap = new ConcurrentHashMap<>();
+  private Map<Integer, BlockingQueue<RPCResponse>> responseMap = new ConcurrentHashMap<>();
+
+  private BlockingQueue<RPCResponseEvent> responseEventQueue = new LinkedBlockingQueue<>();
 
   private RPCCaller() {
     new Thread(this).start();
@@ -39,7 +41,7 @@ public class RPCCaller implements Runnable {
   }
 
   private RPCResponse waitForResponse(int sessionId, int requestId) {
-    BlockingQueue<RPCResponseEvent> queue;
+    BlockingQueue<RPCResponse> queue;
     if (!responseMap.containsKey(sessionId)) {
       queue = new LinkedBlockingQueue<>();
       responseMap.put(sessionId, queue);
@@ -54,15 +56,13 @@ public class RPCCaller implements Runnable {
     }
   }
 
-  private RPCResponse fetchResponse(BlockingQueue<RPCResponseEvent> queue, int sessionId, int requestId) {
+  private RPCResponse fetchResponse(BlockingQueue<RPCResponse> queue, int sessionId, int requestId) {
     try {
-      RPCResponseEvent rpcResponseEvent = queue.take();
-      byte[] bytes = readReponse();
-      RPCResponse rpcResponse = SerializationUtil.deserialize(bytes, RPCResponse.class);
+      RPCResponse rpcResponse = queue.take();
       if (rpcResponse.getSessionId() == sessionId && rpcResponse.getRequestId() == requestId) {
         return rpcResponse;
       } else {
-        System.out.println("wrong response!!!");
+        // System.out.println("got wrong message!!!");
         return null;
       }
     } catch (InterruptedException e) {
@@ -112,12 +112,26 @@ public class RPCCaller implements Runnable {
   public void run() {
     //当有新的Request写入requestDataBuffer后，他被得到通知，获取requestDataBuffer的锁，读取数据，并解析为Request 对象，
     //把这个对象包装为一个Job，放入到一个线程池里去执行
-    while(true){
+    while (true) {
+      //请求事件
       try {
-        RPCRequestEvent requestEvent = requestEventQueue.take();
-        byte[] bytes = readRequest();
-        RPCRequest rpcRequest = SerializationUtil.deserialize(bytes, RPCRequest.class);
-        threadPool.submit(new Job(rpcRequest));
+        RPCRequestEvent requestEvent = requestEventQueue.poll(10, TimeUnit.MILLISECONDS);
+        if (requestEvent != null) {
+          byte[] bytes = readRequest();
+          RPCRequest rpcRequest = SerializationUtil.deserialize(bytes, RPCRequest.class);
+          threadPool.submit(new Job(rpcRequest));
+        }
+      } catch (InterruptedException e) {
+        throw new RuntimeException(e);
+      }
+      //响应事件
+      try {
+        RPCResponseEvent responseEvent = responseEventQueue.poll(10, TimeUnit.MILLISECONDS);
+        if (responseEvent != null) {
+          byte[] bytes = readReponse();
+          RPCResponse rpcResponse = SerializationUtil.deserialize(bytes, RPCResponse.class);
+          responseMap.get(rpcResponse.getSessionId()).put(rpcResponse);
+        }
       } catch (InterruptedException e) {
         throw new RuntimeException(e);
       }
@@ -140,7 +154,7 @@ public class RPCCaller implements Runnable {
       writeReponse(bytes);
       //响应通知
       try {
-        responseMap.get(rpcRequest.getSessionId()).put(new RPCResponseEvent());
+        responseEventQueue.put(new RPCResponseEvent());
       } catch (InterruptedException e) {
         throw new RuntimeException(e);
       }
